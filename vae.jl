@@ -30,7 +30,7 @@ tb_logger = TBLogger("runs/run", min_level=Logging.Info)
     latent_dim = 2          # latent dimension
     hidden_dim = 500        # hidden dimension
 
-    ivae = true             # use IVAE or VAE
+    ivae = true             # use iVAE or VAE
     loss = "elbo"           # loss function to use: "elbo" or "vae"
     save_path = "output"    # results path
 end
@@ -124,7 +124,11 @@ function evaluate(args::Args, encoder, decoder, prior_encoder)
     for (X, y, u) in dataloader
         prior_μ, prior_logσ = prior_encoder(u)
 
-        μ, logσ = encoder(X, u)
+        if args.ivae
+            μ, logσ = encoder(X, u)
+        else
+            μ, logσ = encoder(X)
+        end
         z = μ + randn(Float32, size(logσ)) .* exp.(logσ)
         X̂ = decoder(z)
 
@@ -142,6 +146,9 @@ end
 
 function train(; kws...)
     local loss
+    local prior_μ_history
+
+    prior_μ_history = []
 
     args = Args(; kws...)
     dataloader = get_dataloader(args, false)
@@ -164,7 +171,7 @@ function train(; kws...)
 
     # decoder_σ = 0.01f0
 
-    parameters = Flux.params(encoder.encoder_features, encoder.encoder_μ, encoder.encoder_logσ, decoder)
+    parameters = Flux.params(encoder, decoder, prior_encoder)
 
     @info "Starting training, $(args.epochs) epochs..."
     for epoch in 1:args.epochs
@@ -199,24 +206,34 @@ function train(; kws...)
             end
             Flux.Optimise.update!(opt, parameters, grad)
         end
-        X̂ = generate_digits(prior_encoder, decoder, struct2dict(args))
-        image = convert_to_image(X̂, struct2dict(args)[:sample_size])
+        samples_per_class = 5
+        X̂ = generate_digits(struct2dict(args), prior_encoder, decoder, samples_per_class=samples_per_class)
+        image = convert_to_image(X̂, num_columns=struct2dict(args)[:sample_size], num_rows=samples_per_class)
         eval_loss = evaluate(args, encoder, decoder, prior_encoder)
+
+        latent_space_plot = visualize_latent_space(struct2dict(args), get_dataloader(args, true), encoder)
 
         if args.latent_dim == 2
             y = 0:9
             u = Flux.onehotbatch(y, 0:9)
             prior_μ, prior_logσ = prior_encoder(u)
+            push!(prior_μ_history, prior_μ)
+
             priors_plot = visualize_priors_2d(prior_μ, prior_logσ, y)
+            # prior_history_plot = visualize_prior_mean_history_2d(prior_μ_history, prior_logσ)
+            prior_history_plot = visualize_prior_mean_history_2d(prior_μ_history)
+
             with_logger(tb_logger) do
-                @info "Priors" priors = priors_plot log_step_increment = 0
+                @info "Latent space" priors = priors_plot log_step_increment = 0
+                @info "Latent space" prior_history = prior_history_plot log_step_increment = 0
             end
         end
 
         with_logger(tb_logger) do
             @info "Loss" eval_loss = eval_loss log_step_increment = 0
             @info "Digits" digits = image log_step_increment = 0
-            @info "Histogram" histogram = histogram(reshape(X̂, :)) log_step_increment = 0
+            @info "Digits" histogram = histogram(reshape(X̂, :)) log_step_increment = 0
+            @info "Latent space" latent_space = latent_space_plot log_step_increment = 0
         end
     end
 
