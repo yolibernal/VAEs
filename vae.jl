@@ -31,7 +31,6 @@ tb_logger = TBLogger("runs/run", min_level=Logging.Info)
     hidden_dim = 500        # hidden dimension
 
     ivae = true             # use iVAE or VAE
-    loss = "elbo"           # loss function to use: "elbo" or "vae"
     save_path = "output"    # results path
 end
 
@@ -85,20 +84,6 @@ Decoder(input_dim::Int, latent_dim::Int, hidden_dim::Int) = Chain(
     Dense(hidden_dim, input_dim)
 )
 
-function vae_loss(X, X̂, μ, logσ)
-    batch_size = size(X)[end]
-    # Closed-form solution for Normal + Standard Normal: https://jamesmccaffrey.wordpress.com/2021/02/03/the-kullback-leibler-divergence-for-two-gaussian-distributions/
-    # The @. macro makes sure that all operates are elementwise (https://github.com/alecokas/flux-vae/blob/master/conv-vae/main.jl#L81)
-    kl_q_p = -0.5f0 * sum(@. (1.0f0 + 2 * logσ - μ^2 - exp(2 * logσ))) / batch_size
-
-    # TODO: what is c? do we need it?
-    # reconstruction_loss = (1 / 2c) * sum(norm(X - X̂)) / batch_size
-    reconstruction_loss = logitbinarycrossentropy(X̂, X, agg=sum) / batch_size
-
-    loss = reconstruction_loss + kl_q_p
-    return loss
-end
-
 function elbo_loss(X̂, μ, prior_μ, logσ, prior_logσ, X, z)
     batch_size = size(X)[end]
 
@@ -132,14 +117,7 @@ function evaluate(args::Args, encoder, decoder, prior_encoder)
         z = μ + randn(Float32, size(logσ)) .* exp.(logσ)
         X̂ = decoder(z)
 
-        # TODO: refactor to not duplicate training
-        if args.loss == "vae"
-            loss = vae_loss(X, X̂, μ, logσ)
-        elseif args.loss == "elbo"
-            loss = elbo_loss(X̂, μ, prior_μ, logσ, prior_logσ, X, z)
-        else
-            error("Unknown loss: $(args.loss)")
-        end
+        loss = elbo_loss(X̂, μ, prior_μ, logσ, prior_logσ, X, z)
     end
     return loss
 end
@@ -188,16 +166,9 @@ function train(; kws...)
 
                 # encoder_dist
                 z = μ + randn(Float32, size(logσ)) .* exp.(logσ)
-
                 X̂ = decoder(z)
 
-                if args.loss == "vae"
-                    loss = vae_loss(X, X̂, μ, logσ)
-                elseif args.loss == "elbo"
-                    loss = elbo_loss(X̂, μ, prior_μ, logσ, prior_logσ, X, z)
-                else
-                    error("Unknown loss: $(args.loss)")
-                end
+                loss = elbo_loss(X̂, μ, prior_μ, logσ, prior_logσ, X, z)
 
                 return loss
             end
