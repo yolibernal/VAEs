@@ -1,7 +1,7 @@
 using StatsPlots
 using BSON: @load
 using LinearAlgebra
-using Flux
+using Flux: chunk, gpu
 using LaTeXStrings
 
 function visualize_priors_2d(prior_μ, prior_logσ, labels=nothing)
@@ -58,6 +58,9 @@ function visualize_latent_space(args, dataloader, encoder)
 
     classes = 0:9
     labels = Flux.onecold(u, 0:9)
+
+    μ = μ |> cpu
+    labels = labels |> cpu
 
     # TODO: the way the points are plotted makes later classes overlap earlier ones which makes crowded areas seem too homogenous
     plot(title=L"Means of $p(z|X, u)$")

@@ -1,7 +1,7 @@
 using Flux
 using BSON: @load
 using DrWatson: struct2dict
-using Flux: chunk
+using Flux
 using Images
 using Plots
 
@@ -21,7 +21,7 @@ function generate_digits(args, prior_encoder, decoder; samples_per_class=1)
 
   prior_μ, prior_logσ = prior_encoder(u)
 
-  z = prior_μ .+ randn(args[:latent_dim], args[:sample_size] * samples_per_class) .* exp.(prior_logσ)
+  z = prior_μ .+ (randn(args[:latent_dim], args[:sample_size] * samples_per_class) |> gpu) .* exp.(prior_logσ)
 
   X̂ = decoder(z)
   X̂ = sigmoid.(X̂)

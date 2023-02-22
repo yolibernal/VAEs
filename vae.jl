@@ -2,6 +2,7 @@ include("generate.jl")
 include("visualize.jl")
 
 using Flux
+using CUDA
 using Flux: @functor
 using Flux.Data: DataLoader
 using Flux.Losses: logitbinarycrossentropy
@@ -39,6 +40,7 @@ end
 
     ivae = true             # use iVAE or VAE
     save_path = "output"    # results path
+    visualize = false       # visualize results
 
     data_dir
 end
@@ -55,7 +57,7 @@ function get_dataloader(args::Args, test_data::Bool=false)
     # Use class labels as u
     u = y
 
-    return DataLoader((X, y, u), batchsize=args.batch_size, shuffle=!test_data)
+    return DataLoader((X, y, u) |> gpu, batchsize=args.batch_size, shuffle=!test_data)
 end
 
 struct Encoder
@@ -93,15 +95,21 @@ Decoder(input_dim::Int, latent_dim::Int, hidden_dim::Int) = Chain(
     Dense(hidden_dim, input_dim)
 )
 
+function logpdf_normal(x, μ, logσ)
+    return (@. -logσ - 0.5 * log(2π) - 0.5 * ((x - μ) / exp.(logσ))^2)
+end
+
 function elbo_loss(X̂, μ, prior_μ, logσ, prior_logσ, X, z)
     batch_size = size(X)[end]
 
     # decoder_dist
     # log_px_z = logpdf(MvNormal(reshape(X̂, :), decoder_σ), reshape(X, :)) / batch_size
     # encoder_dist
-    log_qz_xu = logpdf(MvNormal(reshape(μ, :), reshape(exp.(logσ), :)), reshape(z, :)) / batch_size
+    # log_qz_xu = logpdf(MvNormal(reshape(μ, :), reshape(exp.(logσ), :)), reshape(z, :)) / batch_size
+    log_qz_xu = sum(logpdf_normal(z, μ, logσ)) / batch_size
     # prior_dist
-    log_pz_u = logpdf(MvNormal(reshape(prior_μ, :), reshape(exp.(prior_logσ), :)), reshape(z, :)) / batch_size
+    # log_pz_u = logpdf(MvNormal(reshape(prior_μ, :), reshape(exp.(prior_logσ), :)), reshape(z, :)) / batch_size
+    log_pz_u = sum(logpdf_normal(z, prior_μ, prior_logσ)) / batch_size
 
     reconstruction_loss = logitbinarycrossentropy(X̂, X, agg=sum) / batch_size
 
@@ -123,7 +131,7 @@ function evaluate(args::Args, encoder, decoder, prior_encoder)
         else
             μ, logσ = encoder(X)
         end
-        z = μ + randn(Float32, size(logσ)) .* exp.(logσ)
+        z = μ + (randn(Float32, size(logσ)) |> gpu) .* exp.(logσ)
         X̂ = decoder(z)
 
         loss = elbo_loss(X̂, μ, prior_μ, logσ, prior_logσ, X, z)
@@ -137,8 +145,7 @@ function train(; kws...)
 
     prior_μ_history = []
 
-    args = Args(; kws...)
-    @info args
+    @show args = Args(; kws...)
 
     dataloader = get_dataloader(args, false)
     opt = AdamW(args.η, args.β, args.λ)
@@ -152,6 +159,10 @@ function train(; kws...)
     end
 
     decoder = Decoder(args.input_dim, args.latent_dim, args.hidden_dim)
+
+    prior_encoder = prior_encoder |> gpu
+    encoder = encoder |> gpu
+    decoder = decoder |> gpu
 
     # TODO: generalize for other distributions
     # prior_dist = MvNormal
@@ -176,7 +187,7 @@ function train(; kws...)
                 end
 
                 # encoder_dist
-                z = μ + randn(Float32, size(logσ)) .* exp.(logσ)
+                z = μ + (randn(Float32, size(logσ)) |> gpu) .* exp.(logσ)
                 X̂ = decoder(z)
 
                 loss = elbo_loss(X̂, μ, prior_μ, logσ, prior_logσ, X, z)
@@ -188,40 +199,51 @@ function train(; kws...)
             end
             Flux.Optimise.update!(opt, parameters, grad)
         end
-        samples_per_class = 5
-        X̂ = generate_digits(struct2dict(args), prior_encoder, decoder, samples_per_class=samples_per_class)
-        image = convert_to_image(X̂, num_columns=struct2dict(args)[:sample_size], num_rows=samples_per_class)
         eval_loss = evaluate(args, encoder, decoder, prior_encoder)
+        with_logger(tb_logger) do
+            @info "Loss" eval_loss = eval_loss log_step_increment = 0
+        end
 
-        latent_space_plot = visualize_latent_space(struct2dict(args), get_dataloader(args, true), encoder)
 
-        if args.latent_dim == 2
-            y = 0:9
-            u = Flux.onehotbatch(y, 0:9)
-            prior_μ, prior_logσ = prior_encoder(u)
-            push!(prior_μ_history, prior_μ)
+        if args.visualize
+            samples_per_class = 5
+            X̂ = generate_digits(struct2dict(args), prior_encoder, decoder, samples_per_class=samples_per_class) |> cpu
+            digits_plot = convert_to_image(X̂, num_columns=struct2dict(args)[:sample_size], num_rows=samples_per_class)
 
-            priors_plot = visualize_priors_2d(prior_μ, prior_logσ, y)
-            # prior_history_plot = visualize_prior_mean_history_2d(prior_μ_history, prior_logσ)
-            prior_history_plot = visualize_prior_mean_history_2d(prior_μ_history)
+            latent_space_plot = visualize_latent_space(struct2dict(args), get_dataloader(args, true), encoder)
 
             with_logger(tb_logger) do
-                @info "Latent space" priors = priors_plot log_step_increment = 0
-                @info "Latent space" prior_history = prior_history_plot log_step_increment = 0
+                @info "Digits" digits = digits_plot log_step_increment = 0
+                @info "Digits" histogram = histogram(reshape(X̂, :)) log_step_increment = 0
+                @info "Latent space" latent_space = latent_space_plot log_step_increment = 0
+            end
+
+            if args.latent_dim == 2
+                y = 0:9
+                u = Flux.onehotbatch(y, 0:9)
+                prior_μ, prior_logσ = prior_encoder(u)
+                push!(prior_μ_history, prior_μ)
+
+                priors_plot = visualize_priors_2d(prior_μ |> cpu, prior_logσ |> cpu, y |> cpu)
+                # prior_history_plot = visualize_prior_mean_history_2d(prior_μ_history, prior_logσ)
+                prior_history_plot = visualize_prior_mean_history_2d(prior_μ_history |> cpu)
+
+                with_logger(tb_logger) do
+                    @info "Latent space" priors = priors_plot log_step_increment = 0
+                    @info "Latent space" prior_history = prior_history_plot log_step_increment = 0
+                end
             end
         end
 
-        with_logger(tb_logger) do
-            @info "Loss" eval_loss = eval_loss log_step_increment = 0
-            @info "Digits" digits = image log_step_increment = 0
-            @info "Digits" histogram = histogram(reshape(X̂, :)) log_step_increment = 0
-            @info "Latent space" latent_space = latent_space_plot log_step_increment = 0
-        end
     end
 
     # Save model
+    if !isdir(args.save_path)
+        mkpath(args.save_path)
+    end
+
     model_path = joinpath(args.save_path, "ivae.bson")
-    let encoder = encoder, decoder = decoder, args = struct2dict(args)
+    let encoder = encoder |> cpu, decoder = decoder |> cpu, prior_encoder = prior_encoder |> cpu, args = struct2dict(args) |> cpu
         BSON.@save model_path encoder decoder prior_encoder args
         @info "Model saved: $(model_path)"
     end
