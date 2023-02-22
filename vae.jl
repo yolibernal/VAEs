@@ -12,10 +12,17 @@ using DrWatson: struct2dict
 using Distributions: MvNormal, Normal, logpdf
 using Statistics: mean, std
 using Plots
-
+using ArgParse
 using TensorBoardLogger, Logging, Random
 
 tb_logger = TBLogger("runs/run", min_level=Logging.Info)
+
+args_settings = ArgParseSettings(autofix_names=true)
+@add_arg_table! args_settings begin
+    "--data-dir"
+    help = "directory to store data"
+    required = true
+end
 
 @with_kw mutable struct Args
     η = 1e-3                # learning rate
@@ -32,13 +39,15 @@ tb_logger = TBLogger("runs/run", min_level=Logging.Info)
 
     ivae = true             # use iVAE or VAE
     save_path = "output"    # results path
+
+    data_dir
 end
 
 function get_dataloader(args::Args, test_data::Bool=false)
     if test_data == true
-        X, y = MLDatasets.MNIST.testdata()
+        X, y = MLDatasets.MNIST.testdata(dir=args.data_dir)
     else
-        X, y = MLDatasets.MNIST.traindata()
+        X, y = MLDatasets.MNIST.traindata(dir=args.data_dir)
     end
 
     X = reshape(Float32.(X), args.input_dim, :)
@@ -129,6 +138,8 @@ function train(; kws...)
     prior_μ_history = []
 
     args = Args(; kws...)
+    @info args
+
     dataloader = get_dataloader(args, false)
     opt = AdamW(args.η, args.β, args.λ)
 
@@ -217,6 +228,6 @@ function train(; kws...)
 end
 
 if abspath(PROGRAM_FILE) == @__FILE__
-    train()
+    parsed_args = parse_args(args_settings, as_symbols=true)
+    train(; parsed_args...)
 end
-
