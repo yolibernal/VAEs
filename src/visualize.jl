@@ -3,6 +3,7 @@ using BSON: @load
 using LinearAlgebra
 using Flux: chunk, gpu
 using LaTeXStrings
+using Images
 
 function visualize_priors_2d(prior_μ, prior_logσ, labels=nothing)
     if size(prior_μ, 1) != 2
@@ -80,20 +81,13 @@ function visualize_latent_space(args, dataloader, encoder)
     plot!()
 end
 
-if abspath(PROGRAM_FILE) == @__FILE__
-    include("vae.jl")
+function convert_to_image(X; num_rows, num_columns)
+    img_list = reshape.(chunk(X, num_columns * num_rows), 28, :)
 
-    @load "output/ivae.bson" encoder decoder prior_encoder args
-    y = 0:9
-    u = Flux.onehotbatch(y, 0:9)
-
-    prior_μ, prior_logσ = prior_encoder(u)
-    visualize_priors_2d(prior_μ, prior_logσ, y)
-
-    # TODO: put args in Args constructor (Args(args)?)
-    args = Args()
-    dataloader = get_dataloader(args)
-    X, y, u = first(dataloader)
-    visualize_latent_space(args, dataloader, encoder)
+    img_rows = map(chunk(img_list, num_rows)) do imgs
+        permutedims(vcat(imgs...), (2, 1))
+    end
+    img_grid = Gray.(vcat(img_rows...))
+    return img_grid
 end
 

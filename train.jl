@@ -1,28 +1,24 @@
-include("generate.jl")
-include("visualize.jl")
-
 using Flux
-using CUDA
-using Flux: @functor
-using Flux.Data: DataLoader
-using Flux.Losses: logitbinarycrossentropy
+using VAEs
 using Parameters: @with_kw
 using MLDatasets
 using BSON
 using DrWatson: struct2dict
-using Distributions: MvNormal, Normal, logpdf
-using Statistics: mean, std
-using Plots
+using Logging
+using TensorBoardLogger
 using ArgParse
-using TensorBoardLogger, Logging, Random
-
-tb_logger = TBLogger("runs/run", min_level=Logging.Info)
+using Flux.Data: DataLoader
+using Plots
 
 args_settings = ArgParseSettings(autofix_names=true)
 @add_arg_table! args_settings begin
     "--data-dir"
     help = "directory to store data"
     required = true
+
+    "--visualize"
+    help = "generate plots during training"
+    action = :store_true
 end
 
 @with_kw mutable struct Args
@@ -40,17 +36,20 @@ end
 
     ivae = true             # use iVAE or VAE
     save_path = "output"    # results path
-    visualize = false       # visualize results
 
+    visualize               # visualize results
     data_dir
 end
 
+tb_logger = TBLogger("runs/run", min_level=Logging.Info)
+
 function get_dataloader(args::Args, test_data::Bool=false)
     if test_data == true
-        X, y = MLDatasets.MNIST.testdata(dir=args.data_dir)
+        dataset = MNIST(:test, dir=args.data_dir)
     else
-        X, y = MLDatasets.MNIST.traindata(dir=args.data_dir)
+        dataset = MNIST(:train, dir=args.data_dir)
     end
+    X, y = dataset.features, dataset.targets
 
     X = reshape(Float32.(X), args.input_dim, :)
     y = Flux.onehotbatch(y, 0:9)
@@ -60,79 +59,16 @@ function get_dataloader(args::Args, test_data::Bool=false)
     return DataLoader((X, y, u) |> gpu, batchsize=args.batch_size, shuffle=!test_data)
 end
 
-struct Encoder
-    encoder_features
-    encoder_μ
-    encoder_logσ
-end
-@functor Encoder
-
-Encoder(input_dim::Int, out_dim::Int, hidden_dim::Int) = Encoder(
-    # encoder_features
-    Dense(input_dim, hidden_dim, relu),
-    # encoder_μ
-    Dense(hidden_dim, out_dim),
-    # encoder_logσ
-    Dense(hidden_dim, out_dim),
-)
-
-function (encoder::Encoder)(Xu)
-    h = encoder.encoder_features(Xu)
-    encoder.encoder_μ(h), encoder.encoder_logσ(h)
-end
-
-function (encoder::Encoder)(X, u)
-    Xu = vcat(X, u)
-    h = encoder.encoder_features(Xu)
-    encoder.encoder_μ(h), encoder.encoder_logσ(h)
-end
-
-
-# Decoder
-
-Decoder(input_dim::Int, latent_dim::Int, hidden_dim::Int) = Chain(
-    Dense(latent_dim, hidden_dim, relu),
-    Dense(hidden_dim, input_dim)
-)
-
-function logpdf_normal(x, μ, logσ)
-    return (@. -logσ - 0.5 * log(2π) - 0.5 * ((x - μ) / exp.(logσ))^2)
-end
-
-function elbo_loss(X̂, μ, prior_μ, logσ, prior_logσ, X, z)
-    batch_size = size(X)[end]
-
-    # decoder_dist
-    # log_px_z = logpdf(MvNormal(reshape(X̂, :), decoder_σ), reshape(X, :)) / batch_size
-    # encoder_dist
-    # log_qz_xu = logpdf(MvNormal(reshape(μ, :), reshape(exp.(logσ), :)), reshape(z, :)) / batch_size
-    log_qz_xu = sum(logpdf_normal(z, μ, logσ)) / batch_size
-    # prior_dist
-    # log_pz_u = logpdf(MvNormal(reshape(prior_μ, :), reshape(exp.(prior_logσ), :)), reshape(z, :)) / batch_size
-    log_pz_u = sum(logpdf_normal(z, prior_μ, prior_logσ)) / batch_size
-
-    reconstruction_loss = logitbinarycrossentropy(X̂, X, agg=sum) / batch_size
-
-    kl_q_p = log_qz_xu - log_pz_u
-
-    loss = reconstruction_loss + kl_q_p
-    return loss
-end
-
-function evaluate(args::Args, encoder, decoder, prior_encoder)
+function evaluate(args::Args, vae)
     dataloader = get_dataloader(args, true)
 
     loss = 0.0f0
     for (X, y, u) in dataloader
-        prior_μ, prior_logσ = prior_encoder(u)
-
         if args.ivae
-            μ, logσ = encoder(X, u)
+            X̂, μ, prior_μ, logσ, prior_logσ, z = vae(X, u)
         else
-            μ, logσ = encoder(X)
+            X̂, μ, prior_μ, logσ, prior_logσ, z = vae(X)
         end
-        z = μ + (randn(Float32, size(logσ)) |> gpu) .* exp.(logσ)
-        X̂ = decoder(z)
 
         loss = elbo_loss(X̂, μ, prior_μ, logσ, prior_logσ, X, z)
     end
@@ -150,19 +86,17 @@ function train(; kws...)
     dataloader = get_dataloader(args, false)
     opt = AdamW(args.η, args.β, args.λ)
 
+    decoder = Decoder(args.input_dim, args.latent_dim, args.hidden_dim)
     if args.ivae
         prior_encoder = Encoder(args.u_dim, args.latent_dim, args.hidden_dim)
         encoder = Encoder(args.input_dim + args.u_dim, args.latent_dim, args.hidden_dim)
+        vae = iVAE(prior_encoder, encoder, decoder)
     else
-        prior_encoder = (u) -> (zeros(args.latent_dim, size(u)[end]), ones(args.latent_dim, size(u)[end]))
         encoder = Encoder(args.input_dim, args.latent_dim, args.hidden_dim)
+        vae = iVAE(encoder, decoder)
     end
 
-    decoder = Decoder(args.input_dim, args.latent_dim, args.hidden_dim)
-
-    prior_encoder = prior_encoder |> gpu
-    encoder = encoder |> gpu
-    decoder = decoder |> gpu
+    vae = vae |> gpu
 
     # TODO: generalize for other distributions
     # prior_dist = MvNormal
@@ -171,24 +105,18 @@ function train(; kws...)
 
     # decoder_σ = 0.01f0
 
-    parameters = Flux.params(encoder, decoder, prior_encoder)
+    parameters = Flux.params(vae)
 
     @info "Starting training, $(args.epochs) epochs..."
     for epoch in 1:args.epochs
         @info "Epoch $(epoch)..."
         for (X, _, u) in dataloader
             grad = Flux.gradient(parameters) do
-                prior_μ, prior_logσ = prior_encoder(u)
-
                 if args.ivae
-                    μ, logσ = encoder(X, u)
+                    X̂, μ, prior_μ, logσ, prior_logσ, z = vae(X, u)
                 else
-                    μ, logσ = encoder(X)
+                    X̂, μ, prior_μ, logσ, prior_logσ, z = vae(X)
                 end
-
-                # encoder_dist
-                z = μ + (randn(Float32, size(logσ)) |> gpu) .* exp.(logσ)
-                X̂ = decoder(z)
 
                 loss = elbo_loss(X̂, μ, prior_μ, logσ, prior_logσ, X, z)
 
@@ -199,7 +127,7 @@ function train(; kws...)
             end
             Flux.Optimise.update!(opt, parameters, grad)
         end
-        eval_loss = evaluate(args, encoder, decoder, prior_encoder)
+        eval_loss = evaluate(args, vae)
         with_logger(tb_logger) do
             @info "Loss" eval_loss = eval_loss log_step_increment = 0
         end
@@ -221,7 +149,7 @@ function train(; kws...)
             if args.latent_dim == 2
                 y = 0:9
                 u = Flux.onehotbatch(y, 0:9)
-                prior_μ, prior_logσ = prior_encoder(u)
+                prior_μ, prior_logσ = vae.prior_encoder(u)
                 push!(prior_μ_history, prior_μ)
 
                 priors_plot = visualize_priors_2d(prior_μ |> cpu, prior_logσ |> cpu, y |> cpu)
