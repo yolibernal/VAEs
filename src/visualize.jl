@@ -4,6 +4,7 @@ using LinearAlgebra
 using Flux: chunk, gpu
 using LaTeXStrings
 using Images
+using GraphRecipes
 
 function visualize_priors_2d(prior_μ, prior_logσ, labels=nothing)
     if size(prior_μ, 1) != 2
@@ -79,6 +80,16 @@ function visualize_latent_space(args, dataloader, encoder)
     # scatter(μ[1, :], μ[2, :], mc=labels, ma=0.7)
 
     plot!()
+end
+
+function plot_causal_graph_heatmap(A; concepts)
+    heatmap(concepts,
+        concepts, A,
+        title="Concepts")
+end
+
+function plot_causal_graph(A; concepts)
+    graphplot(A, names=concepts, edgelabel=round.(A, digits=2), edgewidth=abs.(A), markersize=0.05, self_edge_size=0.2, nodeshape=:circle)
 end
 
 function convert_to_image(X; num_rows, num_columns)
