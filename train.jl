@@ -10,10 +10,13 @@ using ArgParse
 using Flux.Data: DataLoader
 using Plots
 
+# https://discourse.julialang.org/t/generation-of-documentation-fails-qt-qpa-xcb-could-not-connect-to-display/60988/2
+ENV["GKSwstype"] = 100
+
 args_settings = ArgParseSettings(autofix_names=true)
 @add_arg_table! args_settings begin
     "--data-dir"
-    help = "directory to store data"
+    help = "training data directory"
     required = true
 
     "--visualize"
@@ -27,7 +30,7 @@ end
     λ = 0.0f0               # regularization paramater
     batch_size = 128        # batch size
     sample_size = 10        # sampling size for output
-    epochs = 15             # number of epochs
+    epochs = 100            # number of epochs
     seed = 0                # random seed
     input_dim = 28^2        # image size
     u_dim = 10
@@ -41,7 +44,7 @@ end
     data_dir
 end
 
-tb_logger = TBLogger("runs/run", min_level=Logging.Info)
+tb_logger = TBLogger("runs/ivae/run", min_level=Logging.Info)
 
 function get_dataloader(args::Args, test_data::Bool=false)
     if test_data == true
@@ -86,14 +89,14 @@ function train(; kws...)
     dataloader = get_dataloader(args, false)
     opt = AdamW(args.η, args.β, args.λ)
 
-    decoder = Decoder(args.input_dim, args.latent_dim, args.hidden_dim)
+    decoder = Decoder(args.input_dim, args.latent_dim, args.hidden_dim) |> gpu
     if args.ivae
-        prior_encoder = Encoder(args.u_dim, args.latent_dim, args.hidden_dim)
-        encoder = Encoder(args.input_dim + args.u_dim, args.latent_dim, args.hidden_dim)
-        vae = iVAE(prior_encoder, encoder, decoder)
+        prior_encoder = Encoder(args.u_dim, args.latent_dim, args.hidden_dim) |> gpu
+        encoder = Encoder(args.input_dim + args.u_dim, args.latent_dim, args.hidden_dim) |> gpu
+        vae = iVAE(prior_encoder, encoder, decoder) |> gpu
     else
-        encoder = Encoder(args.input_dim, args.latent_dim, args.hidden_dim)
-        vae = iVAE(encoder, decoder)
+        encoder = Encoder(args.input_dim, args.latent_dim, args.hidden_dim) |> gpu
+        vae = iVAE(encoder, decoder) |> gpu
     end
 
     vae = vae |> gpu
@@ -136,7 +139,7 @@ function train(; kws...)
         if args.visualize
             samples_per_class = 5
             X̂ = generate_digits(struct2dict(args), prior_encoder, decoder, samples_per_class=samples_per_class) |> cpu
-            digits_plot = convert_to_image(X̂, num_columns=struct2dict(args)[:sample_size], num_rows=samples_per_class)
+            digits_plot = convert_to_image(X̂, num_rows=samples_per_class)
 
             latent_space_plot = visualize_latent_space(struct2dict(args), get_dataloader(args, true), encoder)
 

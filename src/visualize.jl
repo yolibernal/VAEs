@@ -83,22 +83,34 @@ function visualize_latent_space(args, dataloader, encoder)
 end
 
 function plot_causal_graph_heatmap(A; concepts)
+    maxval = maximum(abs.(A))
     heatmap(concepts,
-        concepts, A,
-        title="Concepts")
+        concepts,
+        A,
+        title="Concepts",
+        c=cgrad([:blue, :white, :red]),
+        clims=(-maxval, maxval))
 end
 
 function plot_causal_graph(A; concepts)
     graphplot(A, names=concepts, edgelabel=round.(A, digits=2), edgewidth=abs.(A), markersize=0.05, self_edge_size=0.2, nodeshape=:circle)
 end
 
-function convert_to_image(X; num_rows, num_columns)
-    img_list = reshape.(chunk(X, num_columns * num_rows), 28, :)
-
-    img_rows = map(chunk(img_list, num_rows)) do imgs
-        permutedims(vcat(imgs...), (2, 1))
+function convert_to_image(X; num_rows, img_dim=28, num_channels=1)
+    imgs = eachslice(X, dims=2)
+    img_list = num_channels == 1 ?
+               permutedims.(reshape.(imgs, img_dim, img_dim), ((2, 1),)) :
+               reshape.(imgs, num_channels, img_dim, img_dim)
+    if num_channels == 1
+        img_list = colorview.(Gray, (img_list))
+    elseif num_channels == 3
+        img_list = colorview.(RGB, (img_list))
+    elseif num_channels == 4
+        img_list = colorview.(RGBA, (img_list))
     end
-    img_grid = Gray.(vcat(img_rows...))
+    img_rows = map(chunk(img_list, num_rows)) do imgs
+        hcat(imgs...)
+    end
+    img_grid = vcat(img_rows...)
     return img_grid
 end
-

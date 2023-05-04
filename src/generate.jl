@@ -5,7 +5,7 @@ using Flux
 
 function generate_digits(args, prior_encoder, decoder; samples_per_class=1)
   y = repeat(0:9, samples_per_class)
-  u = Flux.onehotbatch(y, 0:9)
+  u = Flux.onehotbatch(y, 0:9) |> gpu
 
   prior_μ, prior_logσ = prior_encoder(u)
 
