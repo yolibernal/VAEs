@@ -35,6 +35,12 @@ args_settings = ArgParseSettings(autofix_names=true)
 end
 
 concepts = ["pendulum angle", "light angle", "shadow length", "shadow position"]
+A_true = [
+    [0 0 0.5 0.5]
+    [0 0 0.5 0.5]
+    [0 0 0 0]
+    [0 0 0 0]
+]
 
 @with_kw mutable struct Args
     batch_size::Int = 32
@@ -52,6 +58,8 @@ concepts = ["pendulum angle", "light angle", "shadow length", "shadow position"]
     α::Float32 = 50
     β::Float32 = 1
     γ::Float32 = 1
+
+    use_true_A = false
 
     epochs = 200
     epochs_pretrain = 0
@@ -135,15 +143,23 @@ function train(; kws...)
     decoder = Decoder(args.input_dim, args.latent_dim, args.hidden_dim) |> gpu
 
     # A = UpperTriangular(randn(Float32, args.n_dim, args.n_dim))
-    A = fill(0.5f0, (4, 4))
-    A[diagind(A)] .= 0.0f0
+    if args.use_true_A
+        A = A_true
+    else
+        A = fill(0.5f0, (4, 4))
+        A[diagind(A)] .= 0.0f0
+    end
     @info "Causal graph after initialization" A = A
 
     A = A |> gpu
 
     vae = CausalVAE(prior_encoder, encoder, decoder, A) |> gpu
 
-    parameters = Flux.params(A, prior_encoder, encoder, decoder)
+    if args.use_true_A
+        parameters = Flux.params(prior_encoder, encoder, decoder)
+    else
+        parameters = Flux.params(A, prior_encoder, encoder, decoder)
+    end
 
     @info "Starting pre-training, $(args.epochs_pretrain) epochs..."
     # Initialize
@@ -153,7 +169,7 @@ function train(; kws...)
     H_A_prev = H_A
 
     # Pretrain causal graph using Augemented Lagrangian method
-    if args.epochs_pretrain > 0
+    if args.epochs_pretrain > 0 && !args.use_true_A
         for epoch in 1:args.epochs_pretrain
             @info "Epoch (pretrain) $(epoch)..."
             for (X, u) in dataloader
